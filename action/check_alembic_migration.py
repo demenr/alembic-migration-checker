@@ -185,11 +185,66 @@ class AlembicMigrationChecker:
             print("\nERROR fetching database version:", e)
             sys.exit(1)
 
+    def check_revision(
+        self,
+        current_revision: Script | Tuple[Script, ...],
+        db_version: str,
+        found_revision: bool,
+        pending_migrations_count: int,
+    ):
+        while current_revision is not None:
+            if isinstance(current_revision, tuple):
+                for revision in current_revision:
+                    if revision is None:
+                        continue
+                    b_found_revision, c_pending_migrations_count = self.check_revision(
+                        revision, db_version, found_revision, pending_migrations_count
+                    )
+                    return (
+                        b_found_revision or found_revision,
+                        c_pending_migrations_count + pending_migrations_count,
+                    )
+
+            elif current_revision.revision == db_version:
+                found_revision = True
+                break
+
+            pending_migrations_count += 1
+            # Current_revision.down_revision is the revision id of the previous migration
+            # We need to get the revision id of the previous migration
+            # We can do this by getting the previous migration from the script directory
+            # this will fail in case down_revision is a Tuple
+            if isinstance(current_revision, Script) and isinstance(
+                current_revision.down_revision, tuple
+            ):
+                current_revision = self.script_directory.get_revisions(
+                    current_revision.down_revision
+                )
+            elif isinstance(current_revision, Script):
+                current_revision = self.script_directory.get_revision(
+                    str(current_revision.down_revision)
+                )
+        return found_revision, pending_migrations_count
+
     def evaluate_migration_alignment(self):
-        """Assesses the database against the latest migration script to determine migration readiness and alignment."""
+        """ Assesses the database against the latest migration script to
+        determine migration readiness and alignment.
+        """
         print("Starting migration alignement evaluation...")
         latest_migration_version = self.get_latest_migration_version()
+        if latest_migration_version is None:
+            print(
+                "\nERROR: No head revision found in Alembic migrations."
+                "Please check the migration script for issues."
+            )
+            sys.exit(1)
         db_version = self.get_db_version()
+        if db_version is None:
+            print(
+                "\nERROR: No database version found."
+                "Please check the database for issues."
+            )
+            sys.exit(1)
         print(
             f"\nLatest Alembic migration version (revision): {latest_migration_version}"
         )
@@ -198,24 +253,22 @@ class AlembicMigrationChecker:
         if latest_migration_version == db_version:
             print(
                 "\nSUCCESS: The database version matches the latest migration script's revision ID. "
-                "\nNOTICE: No new migrations have been detected.\nIf a new migration was expected but not recognized, "
+                "\nNOTICE: No new migrations have been detected.\nIf a "
+                "new migration was expected but not recognized, "
                 "please check the migration script for issues."
             )
             sys.exit(0)
         else:
+            print("Revision do not match, checking for pending migrations...")
             current_revision = self.script_directory.get_revision(
                 latest_migration_version
             )
+            print(f"Current revision: {current_revision}")
             found_revision = False
             pending_migrations_count = 0
-            while current_revision is not None:
-                if current_revision.revision == db_version:
-                    found_revision = True
-                    break
-                pending_migrations_count += 1
-                current_revision = self.script_directory.get_revision(
-                    current_revision.down_revision
-                )
+            found_revision, pending_migrations_count = self.check_revision(
+                current_revision, db_version, found_revision, pending_migrations_count
+            )
 
             if found_revision:
                 if pending_migrations_count == 1:
@@ -239,7 +292,8 @@ class AlembicMigrationChecker:
                 print(
                     f"\nERROR: Version mismatch detected.\n"
                     f"The current database version ({db_version}) does not match the `down_revision` of any known "
-                    f"migration script.\nImmediate Action Required: Review migration history and scripts for accuracy. "
+                    f"migration script.\nImmediate Action Required: "
+                    f"Review migration history and scripts for accuracy. "
                     f"Addressing discrepancies is vital for database integrity and smooth migration processes."
                 )
                 sys.exit(1)
