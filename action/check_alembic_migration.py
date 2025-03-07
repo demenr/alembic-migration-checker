@@ -1,16 +1,18 @@
+import argparse
+import os
+import sys
+from typing import Tuple
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from alembic.script.revision import RangeNotAncestorError, ResolutionError
+from sqlalchemy import MetaData, create_engine
+from sqlalchemy.sql import select
+
 SCRIPT_DESCRIPTION = """
 This script checks the Alembic version of the latest migration against the database and evaluates its readiness.
 It supports PostgreSQL, MySQL, and SQLite databases.
 """
-
-import argparse
-import os
-import sys
-
-from alembic.config import Config
-from alembic.script import ScriptDirectory
-from sqlalchemy import MetaData, create_engine
-from sqlalchemy.sql import select
 
 
 class AlembicMigrationChecker:
@@ -83,10 +85,12 @@ class AlembicMigrationChecker:
         Validates the necessary inputs for connecting to a database and accessing the migrations folder path.
 
         Returns:
-            str: An error message string if validation fails, indicating the reason for the failure. Returns None if all validations pass.
+            str: An error message string if validation fails, indicating the reason for the failure.
+                Returns None if all validations pass.
 
         Raises:
-            Exception: Catches and returns any exceptions as error messages that occur during the validation of the migrations folder path.
+            Exception: Catches and returns any exceptions as error messages that occur during the
+                validation of the migrations folder path.
 
         """
         try:
@@ -123,8 +127,7 @@ class AlembicMigrationChecker:
         """Constructs and returns the database URL."""
         if self.db_type == "sqlite":
             return f"sqlite:///{self.db_name}"  # SQLite doesn't use port
-        else:
-            return f"{self.db_type}://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        return f"{self.db_type}://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
     def _get_database_engine(self):
         """Creates and returns a SQLAlchemy database engine."""
@@ -164,9 +167,9 @@ class AlembicMigrationChecker:
         if head_revision is not None:
             print("Latest migration version found.")
             return head_revision.revision
-        else:
-            print("\nERROR: No head revision found in Alembic migrations.")
-            return None
+
+        print("\nERROR: No head revision found in Alembic migrations.")
+        return None
 
     def get_db_version(self):
         """Fetches and returns the current database version from the Alembic version table."""
@@ -179,55 +182,46 @@ class AlembicMigrationChecker:
             with self.engine.connect() as connection:
                 result = connection.execute(query)
                 db_version = result.fetchone()[0]
-                print(f"Database version fetched successfully.")
+                print("Database version fetched successfully.")
                 return db_version
         except Exception as e:
             print("\nERROR fetching database version:", e)
             sys.exit(1)
 
-    def check_revision(
+    def find_pending_migrations(
         self,
-        current_revision: Script | Tuple[Script, ...],
+        latest_migration: str,
         db_version: str,
-        found_revision: bool,
-        pending_migrations_count: int,
-    ):
-        while current_revision is not None:
-            if isinstance(current_revision, tuple):
-                for revision in current_revision:
-                    if revision is None:
-                        continue
-                    b_found_revision, c_pending_migrations_count = self.check_revision(
-                        revision, db_version, found_revision, pending_migrations_count
-                    )
-                    return (
-                        b_found_revision or found_revision,
-                        c_pending_migrations_count + pending_migrations_count,
-                    )
+    ) -> Tuple[bool, int]:
+        """
+        Checks if the database version is a revision of the latest migration.
+        Returns a tuple of two elements:
+        - The first element is a boolean indicating whether the database version is a revision of the latest migration.
+        - The second element is the number of pending migrations.
 
-            elif current_revision.revision == db_version:
-                found_revision = True
-                break
+        Raises:
+            RangeNotAncestorError: If the database version is not a revision of the latest migration.
+            ResolutionError: If the database version is not a revision of the latest migration.
 
-            pending_migrations_count += 1
-            # Current_revision.down_revision is the revision id of the previous migration
-            # We need to get the revision id of the previous migration
-            # We can do this by getting the previous migration from the script directory
-            # this will fail in case down_revision is a Tuple
-            if isinstance(current_revision, Script) and isinstance(
-                current_revision.down_revision, tuple
-            ):
-                current_revision = self.script_directory.get_revisions(
-                    current_revision.down_revision
-                )
-            elif isinstance(current_revision, Script):
-                current_revision = self.script_directory.get_revision(
-                    str(current_revision.down_revision)
-                )
-        return found_revision, pending_migrations_count
+        Returns:
+            Tuple[bool, int]: A tuple containing a boolean indicating whether the database version
+            is a revision of the latest migration and the number of pending migrations.
+        """
+        try:
+            iterator = self.script_directory.iterate_revisions(
+                latest_migration,
+                db_version,
+            )
+            pending_migrations_count = [
+                revision.revision for revision in iterator if revision is not None
+            ]
+            return True, len(pending_migrations_count)
+        except (RangeNotAncestorError, ResolutionError) as ex:
+            print(f"Error: {ex}")
+            return False, 0
 
     def evaluate_migration_alignment(self):
-        """ Assesses the database against the latest migration script to
+        """Assesses the database against the latest migration script to
         determine migration readiness and alignment.
         """
         print("Starting migration alignement evaluation...")
@@ -260,16 +254,9 @@ class AlembicMigrationChecker:
             sys.exit(0)
         else:
             print("Revision do not match, checking for pending migrations...")
-            current_revision = self.script_directory.get_revision(
-                latest_migration_version
+            found_revision, pending_migrations_count = self.find_pending_migrations(
+                latest_migration_version, db_version
             )
-            print(f"Current revision: {current_revision}")
-            found_revision = False
-            pending_migrations_count = 0
-            found_revision, pending_migrations_count = self.check_revision(
-                current_revision, db_version, found_revision, pending_migrations_count
-            )
-
             if found_revision:
                 if pending_migrations_count == 1:
                     print(
